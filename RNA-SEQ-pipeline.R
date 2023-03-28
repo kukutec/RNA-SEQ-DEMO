@@ -1,9 +1,25 @@
-
-# Step 1: TxImport
+# Step 1: Load packages ----
 library(tidyverse) # provides access to Hadley Wickham's collection of R packages for data science, which we will use throughout the course
 library(tximport) # package for getting Kallisto results into R
 library(ensembldb) #helps deal with ensembl
 library(EnsDb.Hsapiens.v86) #replace with your organism-specific database package
+library(edgeR)
+library(matrixStats)
+library(cowplot)
+library(DT)
+library(gt)
+library(plotly)
+library(limma)
+library(RColorBrewer) #need colors to make heatmaps
+library(gplots) #the heatmap2 function in this package is a primary tool for making heatmaps
+library(gameofthrones) #because...why not.  Install using 'devtools::install_github("aljrico/gameofthrones")'
+library(heatmaply) #for making interactive heatmaps using plotly
+library(d3heatmap) #for making interactive heatmaps using D3
+
+
+
+
+# Step 2: TxImport----
 targets <- read_tsv("studydesign.txt")# read in your study design
 path <- file.path(targets$sample, "abundance.tsv") # set file paths to your mapped data
 Tx <- transcripts(EnsDb.Hsapiens.v86, columns=c("tx_id", "gene_name"))
@@ -17,12 +33,7 @@ Txi_gene <- tximport(path,
                      countsFromAbundance = "lengthScaledTPM",
                      ignoreTxVersion = TRUE)
 
-# Step 2: Data Wrangling
-library(tidyverse)
-library(edgeR)
-library(matrixStats)
-library(cowplot)
-
+# Step 3: Data Wrangling----
 sampleLabels <- targets$sample
 myDGEList <- DGEList(Txi_gene$counts)
 log2.cpm <- cpm(myDGEList, log=TRUE)
@@ -103,11 +114,8 @@ p3 <- ggplot(log2.cpm.filtered.norm.df.pivot) +
 plot_grid(p1, p2, p3, labels = c('A', 'B', 'C'), label_size = 12)
 
 
-#Step 3: PCA & Multivariant Analysis
-library(tidyverse)
-library(DT)
-library(gt)
-library(plotly)
+# Step 4: PCA & Multivariant Analysis----
+
 
 group <- targets$group
 group <- factor(group)
@@ -145,3 +153,86 @@ datatable(mydata.df[,c(1,12:14)],
                          #dom = "Blfrtip", 
                          #buttons = c("copy", "csv", "excel"),
                          lengthMenu = c("10", "25", "50", "100")))
+
+# Step 5: DGE & DTU Analysis----
+group <- factor(targets$group)
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+v.DEGList.filtered.norm <- voom(myDGEList.filtered.norm, design, plot = FALSE)
+fit <- lmFit(v.DEGList.filtered.norm, design)
+contrast.matrix <- makeContrasts(infection = disease - healthy,
+                                 levels=design)
+
+fits <- contrasts.fit(fit, contrast.matrix)
+ebFit <- eBayes(fits)
+myTopHits <- topTable(ebFit, adjust ="BH", coef=1, number=40000, sort.by="logFC")
+myTopHits.df <- myTopHits %>%
+  as_tibble(rownames = "geneID")
+
+vplot <- ggplot(myTopHits) +
+  aes(y=-log10(adj.P.Val), x=logFC, text = paste("Symbol:", geneID)) +
+  geom_point(size=2) +
+  geom_hline(yintercept = -log10(0.01), linetype="longdash", colour="grey", size=1) +
+  geom_vline(xintercept = 1, linetype="longdash", colour="#BE684D", size=1) +
+  geom_vline(xintercept = -1, linetype="longdash", colour="#2C467A", size=1) +
+  #annotate("rect", xmin = 1, xmax = 12, ymin = -log10(0.01), ymax = 7.5, alpha=.2, fill="#BE684D") +
+  #annotate("rect", xmin = -1, xmax = -12, ymin = -log10(0.01), ymax = 7.5, alpha=.2, fill="#2C467A") +
+  labs(title="Volcano plot",
+       subtitle = "Cutaneous leishmaniasis",
+       caption=paste0("produced on ", Sys.time())) +
+  theme_bw()
+
+ggplotly(vplot)
+
+results <- decideTests(ebFit, method="global", adjust.method="BH", p.value=0.05, lfc=1)
+colnames(v.DEGList.filtered.norm$E) <- sampleLabels
+diffGenes <- v.DEGList.filtered.norm$E[results[,1] !=0,]
+diffGenes.df <- as_tibble(diffGenes, rownames = "geneID")
+datatable(diffGenes.df,
+          extensions = c('KeyTable', "FixedHeader"),
+          caption = 'Table 1: DEGs in cutaneous leishmaniasis',
+          options = list(keys = TRUE, searchHighlight = TRUE, pageLength = 10, lengthMenu = c("10", "25", "50", "100"))) %>%
+  formatRound(columns=c(2:11), digits=2)
+
+# Step 6: creates heatmaps from your differentially expressed genes
+# Step 7:                       ----
+----
+myheatcolors <- rev(brewer.pal(name="RdBu", n=11))
+clustRows <- hclust(as.dist(1-cor(t(diffGenes), method="pearson")), method="complete") #cluster rows by pearson correlation
+clustColumns <- hclust(as.dist(1-cor(diffGenes, method="spearman")), method="complete")
+module.assign <- cutree(clustRows, k=2)
+module.color <- rainbow(length(unique(module.assign)), start=0.1, end=0.9) 
+module.color <- module.color[as.vector(module.assign)] 
+heatmap.2(diffGenes, 
+          Rowv=as.dendrogram(clustRows), 
+          Colv=as.dendrogram(clustColumns),
+          RowSideColors=module.color,
+          col=myheatcolors, scale='row', labRow=NA,
+          density.info="none", trace="none",  
+          cexRow=1, cexCol=1, margins=c(8,20))
+
+modulePick <- 2 
+myModule_up <- diffGenes[names(module.assign[module.assign %in% modulePick]),] 
+hrsub_up <- hclust(as.dist(1-cor(t(myModule_up), method="pearson")), method="complete") 
+
+heatmap.2(myModule_up, 
+          Rowv=as.dendrogram(hrsub_up), 
+          Colv=NA, 
+          labRow = NA,
+          col=myheatcolors, scale="row", 
+          density.info="none", trace="none", 
+          RowSideColors=module.color[module.assign%in%modulePick], margins=c(8,20))
+
+modulePick <- 1 
+myModule_down <- diffGenes[names(module.assign[module.assign %in% modulePick]),] 
+hrsub_down <- hclust(as.dist(1-cor(t(myModule_down), method="pearson")), method="complete") 
+
+heatmap.2(myModule_down, 
+          Rowv=as.dendrogram(hrsub_down), 
+          Colv=NA, 
+          labRow = NA,
+          col=myheatcolors, scale="row", 
+          density.info="none", trace="none", 
+          RowSideColors=module.color[module.assign%in%modulePick], margins=c(8,20))
+
